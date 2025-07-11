@@ -16,7 +16,10 @@ load_dotenv()
 
 # Initialize models
 llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.7)
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"}  # or "cuda" if you have GPU
+)
 
 # Helper: Extract video ID
 def extract_youtube_video_id(url):
@@ -31,31 +34,31 @@ def extract_youtube_video_id(url):
         return path_segments[1]
     return None
 
-# Helper: Fetch transcript, translate & clean it using Groq
+# Helper: Fetch transcript with fallback, translate, and clean
 def fetch_transcript_cleaned(video_id, llm, chunk_size=1000):
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-        raw_text = " ".join([chunk["text"] for chunk in transcript])
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
         lang = "en"
-    except NoTranscriptFound:
+        raw_text = " ".join([chunk["text"] for chunk in transcript])
+    except Exception as e:
         try:
             available = YouTubeTranscriptApi.list_transcripts(video_id)
             for t in available:
                 try:
                     transcript = t.fetch()
                     lang = t.language_code
+                    raw_text = " ".join([chunk["text"] for chunk in transcript])
                     break
-                except:
+                except Exception as inner:
                     continue
             else:
+                print("No transcript could be fetched.")
                 return None
-            raw_text = " ".join([chunk["text"] for chunk in transcript])
-        except:
+        except Exception as outer:
+            print("Transcript listing failed:", outer)
             return None
-    except (TranscriptsDisabled, Exception):
-        return None
 
-    # Translate to English if needed
+    # Translate if not in English
     if lang != "en":
         chunks = [raw_text[i:i+chunk_size] for i in range(0, len(raw_text), chunk_size)]
         translated = []
@@ -64,7 +67,7 @@ def fetch_transcript_cleaned(video_id, llm, chunk_size=1000):
             translated.append(str(llm.invoke(prompt)))
         raw_text = " ".join(translated)
 
-    # Final grammar and clarity correction
+    # Final clarity & grammar cleanup
     final_chunks = [raw_text[i:i+chunk_size] for i in range(0, len(raw_text), chunk_size)]
     cleaned = []
     for chunk in final_chunks:
@@ -73,10 +76,10 @@ def fetch_transcript_cleaned(video_id, llm, chunk_size=1000):
 
     return " ".join(cleaned)
 
-# UI setup
+# Streamlit UI config
 st.set_page_config("YouTube ChatBot", layout="wide")
 
-# Layout: Title + Video side-by-side
+# UI layout
 col1, col2 = st.columns([2, 1])
 with col1:
     st.title("🎥 YouTube ChatBot")
@@ -96,7 +99,7 @@ with col2:
                 unsafe_allow_html=True
             )
 
-# Session state
+# Session state management
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vectorstore" not in st.session_state:
@@ -112,21 +115,24 @@ if yt_link:
         st.session_state.chat_history = []
         st.session_state.vectorstore = None
         with st.spinner("🔄 Fetching and processing transcript..."):
-            transcript = fetch_transcript_cleaned(new_video_id, llm)
-            if transcript:
-                splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
-                docs = splitter.create_documents([transcript])
-                st.session_state.vectorstore = FAISS.from_documents(docs, embedding_model)
-                st.success("✅ Transcript processed successfully!")
-            else:
-                st.error("❌ Failed to fetch transcript.")
+            try:
+                transcript = fetch_transcript_cleaned(new_video_id, llm)
+                if transcript:
+                    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
+                    docs = splitter.create_documents([transcript])
+                    st.session_state.vectorstore = FAISS.from_documents(docs, embedding_model)
+                    st.success("✅ Transcript processed successfully!")
+                else:
+                    st.error("❌ Failed to fetch transcript. Please try a different video.")
+            except Exception as e:
+                st.error(f"❌ Error while processing transcript: {e}")
 
 # Show chat history
 for role, msg in st.session_state.chat_history:
     with st.chat_message(role):
         st.markdown(msg)
 
-# User chat input
+# User input
 if yt_link and st.session_state.vectorstore:
     user_input = st.chat_input("💬 Ask a question about the video")
     if user_input:
