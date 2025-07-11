@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 .cache/
+.streamlit/secrets.toml

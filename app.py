@@ -9,6 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
+import os
 
 # Load environment
 load_dotenv()
@@ -30,7 +31,7 @@ def extract_youtube_video_id(url):
         return path_segments[1]
     return None
 
-# Helper: Fetch transcript, translate & correct it using Groq
+# Helper: Fetch transcript, translate & clean it using Groq
 def fetch_transcript_cleaned(video_id, llm, chunk_size=1000):
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
@@ -60,21 +61,40 @@ def fetch_transcript_cleaned(video_id, llm, chunk_size=1000):
         translated = []
         for chunk in chunks:
             prompt = f"Translate the following transcript to English:\n\n{chunk}"
-            translated.append(str(llm.invoke(prompt)))  # 🔧 convert to string
+            translated.append(str(llm.invoke(prompt)))
         raw_text = " ".join(translated)
 
-    # Final correction
+    # Final grammar and clarity correction
     final_chunks = [raw_text[i:i+chunk_size] for i in range(0, len(raw_text), chunk_size)]
     cleaned = []
     for chunk in final_chunks:
         prompt = f"Please improve the clarity, fix grammar, and make this text more readable:\n\n{chunk}"
-        cleaned.append(str(llm.invoke(prompt)))  # 🔧 convert to string
+        cleaned.append(str(llm.invoke(prompt)))
 
     return " ".join(cleaned)
 
-# Streamlit UI
+# UI setup
 st.set_page_config("YouTube ChatBot", layout="wide")
-st.title("🎥 YouTube ChatBot")
+
+# Layout: Title + Video side-by-side
+col1, col2 = st.columns([2, 1])
+with col1:
+    st.title("🎥 YouTube ChatBot")
+    yt_link = st.text_input("🔗 YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
+
+with col2:
+    if yt_link:
+        video_id = extract_youtube_video_id(yt_link)
+        if video_id:
+            st.markdown(
+                f"""
+                <iframe width="80%" height="200"
+                        src="https://www.youtube.com/embed/{video_id}"
+                        frameborder="0" allowfullscreen>
+                </iframe>
+                """,
+                unsafe_allow_html=True
+            )
 
 # Session state
 if "chat_history" not in st.session_state:
@@ -84,15 +104,12 @@ if "vectorstore" not in st.session_state:
 if "video_id" not in st.session_state:
     st.session_state.video_id = None
 
-# YouTube input
-yt_link = st.text_input("🔗 YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
-
-# Handle new video
+# Process video
 if yt_link:
     new_video_id = extract_youtube_video_id(yt_link)
     if new_video_id and new_video_id != st.session_state.video_id:
         st.session_state.video_id = new_video_id
-        st.session_state.chat_history = []  # clear chat
+        st.session_state.chat_history = []
         st.session_state.vectorstore = None
         with st.spinner("🔄 Fetching and processing transcript..."):
             transcript = fetch_transcript_cleaned(new_video_id, llm)
@@ -100,16 +117,16 @@ if yt_link:
                 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
                 docs = splitter.create_documents([transcript])
                 st.session_state.vectorstore = FAISS.from_documents(docs, embedding_model)
-                st.success("✅ Transcript ready!")
+                st.success("✅ Transcript processed successfully!")
             else:
-                st.error("❌ Could not fetch transcript.")
+                st.error("❌ Failed to fetch transcript.")
 
-# Show previous chat
+# Show chat history
 for role, msg in st.session_state.chat_history:
     with st.chat_message(role):
         st.markdown(msg)
 
-# Ask a question
+# User chat input
 if yt_link and st.session_state.vectorstore:
     user_input = st.chat_input("💬 Ask a question about the video")
     if user_input:
